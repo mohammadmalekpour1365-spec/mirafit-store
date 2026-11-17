@@ -26,6 +26,9 @@ function price(items,method,C){if(!Array.isArray(items)||!items.length||items.le
 const zp=(p,b)=>fetch('https://payment.zarinpal.com/pg/v4/payment/'+p+'.json',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({merchant_id:ZARINPAL_MERCHANT,...b})}).then(r=>r.json());
 const where=o=>o.m==='pickup'?'دریافت حضوری از فروشگاه':`${o.a} · کد پستی ${o.z}`;
 function invoiceHtml(o,shop){return `<div dir="rtl" style="font-family:Tahoma"><h2>${E(shop.name)}</h2><p>فاکتور ${E(o.no)} · ${E(o.d)}</p><p><b>خریدار:</b> ${E(o.b.n)} · ${E(o.b.p)}<br><b>تحویل:</b> ${E(where(o))}</p><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><th>کالا</th><th>تعداد</th><th>قیمت</th></tr>${o.items.map(i=>`<tr><td>${E(i.name)} ${E(i.color)} ${E(i.size)}</td><td>${i.q}</td><td>${T(i.price*i.q)}</td></tr>`).join('')}</table><p>جمع کالاها: ${T(o.sub)}<br>هزینه ارسال: ${o.ship?T(o.ship):'رایگان'}<br><b>مبلغ پرداخت‌شده: ${T(o.total)}</b><br>کد پیگیری پرداخت: ${E(o.ref)}</p><p><b>وضعیت پرداخت: تأیید شد</b></p><p>وضعیت سفارش: در انتظار ${o.m==='pickup'?'آماده‌سازی برای تحویل حضوری':'ارسال'}.</p></div>`}
+async function shopRecipient(){const c=await catalog();return [SHOP_EMAIL,c?.shop?.email].filter((v,i,a)=>v&&a.indexOf(v)===i)}
+function newOrderHtml(o,shop){return `<div dir="rtl" style="font-family:Tahoma"><h2>${E(shop.name)} · سفارش جدید</h2><h3>پیش‌فاکتور ${E(o.no)} (در انتظار تأیید پرداخت)</h3><p>مشتری: ${E(o.b.n)} · ${E(o.b.p)} · ${E(o.b.e)}</p><p>روش دریافت: ${E(where(o))}</p><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><th>محصول</th><th>رنگ</th><th>سایز</th><th>تعداد</th><th>قیمت واحد</th><th>جمع</th></tr>${o.items.map(i=>`<tr><td>${E(i.name)}</td><td>${E(i.color)}</td><td>${E(i.size)}</td><td>${i.q}</td><td>${T(i.price)}</td><td>${T(i.price*i.q)}</td></tr>`).join('')}</table><p>جمع کالاها: ${T(o.sub)}<br>هزینه ارسال: ${o.ship?T(o.ship):'رایگان'}<br><b>مبلغ کل: ${T(o.total)}</b></p><p>وضعیت: در انتظار بررسی و تأیید پرداخت در پنل مدیریت</p></div>`}
+
 app.set('trust proxy',1);app.use(compression());app.use(express.json({limit:'1mb'}));
 const fails={};const sha=s=>crypto.createHash('sha256').update(String(s)).digest();
 function admin(req,res,next){const ip=req.ip,f=fails[ip]||{n:0,t:Date.now()};if(Date.now()-f.t>9e5){f.n=0;f.t=Date.now()}
@@ -45,8 +48,8 @@ app.post('/api/checkout',async(req,res)=>{try{
     const now=Date.now();cardHits[req.ip]=(cardHits[req.ip]||[]).filter(t=>now-t<36e5);if(cardHits[req.ip].length>=10)return res.status(429).json({error:'تعداد درخواست زیاد است؛ بعداً تلاش کنید.'});cardHits[req.ip].push(now);
     const id=crypto.randomUUID(),no='INV-'+String(now).slice(-8);
     await putOrder({id,no,d:new Date().toLocaleDateString('fa-IR',{timeZone:'Asia/Tehran'}),b:{n:b.n,p:b.p,e:b.e},m,a:m==='post'?a:'',z:m==='post'?z:'',items:P.items,sub:P.sub,ship:P.ship,total:P.total,paid:false,pay:'card',cref:refS,receipt:rcOk?receipt:null,status:'awaiting',t:now});
-    if(SHOP_EMAIL)mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:SHOP_EMAIL,subject:`سفارش کارت‌به‌کارت ${no} در انتظار تأیید`,text:`${b.n} - ${b.p}\nمبلغ: ${T(P.total)}\nمرجع پرداخت: ${refS||'از طریق پیام‌رسان ارسال می‌شود'}${rcOk?' (تصویر فیش دارد)':''}\nتأیید از «صندوق سفارش‌ها» در پنل مدیر.`}).catch(e=>console.error('mail',e));
-    return res.json({card:true,id})}
+    try{const recipients=await shopRecipient();if(recipients.length){const o=await getOrder(id);await mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:recipients.join(','),subject:`پیش‌فاکتور سفارش جدید ${no} · در انتظار تأیید`,html:newOrderHtml(o,(await catalog()).shop)});}}catch(e){console.error('New order email failed:',e.message||e)}
+    return res.json({card:true,id,no})}
   const id=crypto.randomUUID(),no='INV-'+Date.now().toString().slice(-8),r=await zp('request',{amount:P.total*RIAL,callback_url:`${BASE_URL}/api/callback?o=${id}`,description:'سفارش '+no,metadata:{mobile:b.p,email:b.e}});
   if(r.data?.code!==100)return res.status(502).json({error:'اتصال به درگاه برقرار نشد.'});
   await putOrder({id,no,d:new Date().toLocaleDateString('fa-IR',{timeZone:'Asia/Tehran'}),b:{n:b.n,p:b.p,e:b.e},m,a:m==='post'?a:'',z:m==='post'?z:'',items:P.items,sub:P.sub,ship:P.ship,total:P.total,authority:r.data.authority,paid:false,status:'unpaid',t:Date.now()});
@@ -64,10 +67,10 @@ app.get('/api/catalog',async(req,res)=>{try{res.set('Cache-Control','no-cache');
 app.post('/api/admin/ping',admin,(req,res)=>res.json({ok:true}));
 async function sendInvoice(o){
   if(!SMTP_HOST||!SMTP_USER||!SMTP_PASS)throw new Error('تنظیمات SMTP در Render کامل نیست (SMTP_HOST / SMTP_USER / SMTP_PASS).');
-  const recipients=[o.b?.e,SHOP_EMAIL].filter((v,i,a)=>v&&a.indexOf(v)===i);
   if(!o.b?.e)throw new Error('ایمیل خریدار در سفارش ثبت نشده است.');
-  const info=await mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:o.b.e,bcc:SHOP_EMAIL&&SHOP_EMAIL!==o.b.e?SHOP_EMAIL:undefined,subject:`فاکتور و تأیید پرداخت سفارش ${o.no}`,html:invoiceHtml(o,(await catalog()).shop)});
-  return {messageId:info.messageId,recipients};
+  const shopRecipients=(await shopRecipient()).filter(x=>x!==o.b.e);
+  const info=await mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:o.b.e,bcc:shopRecipients.length?shopRecipients.join(','):undefined,subject:`فاکتور نهایی و تأیید پرداخت سفارش ${o.no}`,html:invoiceHtml(o,(await catalog()).shop)});
+  return {messageId:info.messageId,recipients:[o.b.e,...shopRecipients]};
 }
 app.post('/api/admin/confirm',admin,async(req,res)=>{try{
   const id=String(req.body?.id||'').trim();if(!id)return res.status(400).json({error:'شناسه سفارش ارسال نشده است.'});
