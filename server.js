@@ -39,14 +39,14 @@ app.post('/api/checkout',async(req,res)=>{try{
   const {b,m,a,z,items,pay,ref,receipt}=req.body||{},ok=s=>typeof s==='string'&&s.length>0&&s.length<300;
   if(!b||!ok(b.n)||!ok(b.p)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.e||'')||!['post','pickup'].includes(m)||(m==='post'&&(!ok(a)||!/^\d{10}$/.test(z||''))))return res.status(400).json({error:'اطلاعات واردشده کامل نیست.'});
   let P;try{P=price(items,m,await catalog())}catch(e){if(typeof e==='string')return res.status(400).json({error:e});throw e}
-  if(pay==='card'){const C=await catalog();if(!/\d{12}/.test(String(C.shop.cardNo||'')))return res.status(400).json({error:'کارت‌به‌کارت فعال نیست.'});
+  if(pay==='card'){
     const refS=typeof ref==='string'?ref.trim():'',rcOk=typeof receipt==='string'&&receipt.length<900000&&/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+\/=]+$/.test(receipt);
     if(refS.length>40||(receipt&&!rcOk))return res.status(400).json({error:'اطلاعات پرداخت یا تصویر فیش نامعتبر است.'});
-    if(refS.length<3&&!rcOk)return res.status(400).json({error:'شمارهٔ پیگیری را بنویسید یا تصویر فیش را ضمیمه کنید.'});
+    // رسید پرداخت جداگانه از طریق پیام‌رسان دریافت و توسط مدیر بررسی می‌شود.
     const now=Date.now();cardHits[req.ip]=(cardHits[req.ip]||[]).filter(t=>now-t<36e5);if(cardHits[req.ip].length>=10)return res.status(429).json({error:'تعداد درخواست زیاد است؛ بعداً تلاش کنید.'});cardHits[req.ip].push(now);
     const id=crypto.randomUUID(),no='INV-'+String(now).slice(-8);
     await putOrder({id,no,d:new Date().toLocaleDateString('fa-IR',{timeZone:'Asia/Tehran'}),b:{n:b.n,p:b.p,e:b.e},m,a:m==='post'?a:'',z:m==='post'?z:'',items:P.items,sub:P.sub,ship:P.ship,total:P.total,paid:false,pay:'card',cref:refS,receipt:rcOk?receipt:null,status:'awaiting',t:now});
-    if(SHOP_EMAIL)mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:SHOP_EMAIL,subject:`سفارش کارت‌به‌کارت ${no} در انتظار تأیید`,text:`${b.n} - ${b.p}\nمبلغ: ${T(P.total)}\nمرجع پرداخت: ${refS||'—'}${rcOk?' (تصویر فیش دارد)':''}\nتأیید از «صندوق سفارش‌ها» در پنل مدیر.`}).catch(e=>console.error('mail',e));
+    if(SHOP_EMAIL)mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:SHOP_EMAIL,subject:`سفارش کارت‌به‌کارت ${no} در انتظار تأیید`,text:`${b.n} - ${b.p}\nمبلغ: ${T(P.total)}\nمرجع پرداخت: ${refS||'از طریق پیام‌رسان ارسال می‌شود'}${rcOk?' (تصویر فیش دارد)':''}\nتأیید از «صندوق سفارش‌ها» در پنل مدیر.`}).catch(e=>console.error('mail',e));
     return res.json({card:true,id})}
   const id=crypto.randomUUID(),no='INV-'+Date.now().toString().slice(-8),r=await zp('request',{amount:P.total*RIAL,callback_url:`${BASE_URL}/api/callback?o=${id}`,description:'سفارش '+no,metadata:{mobile:b.p,email:b.e}});
   if(r.data?.code!==100)return res.status(502).json({error:'اتصال به درگاه برقرار نشد.'});
