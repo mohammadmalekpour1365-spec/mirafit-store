@@ -26,7 +26,7 @@ function price(items,method,C){if(!Array.isArray(items)||!items.length||items.le
 const zp=(p,b)=>fetch('https://payment.zarinpal.com/pg/v4/payment/'+p+'.json',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({merchant_id:ZARINPAL_MERCHANT,...b})}).then(r=>r.json());
 const where=o=>o.m==='pickup'?'دریافت حضوری از فروشگاه':`${o.a} · کد پستی ${o.z}`;
 function invoiceHtml(o,shop){return `<div dir="rtl" style="font-family:Tahoma"><h2>${E(shop.name)}</h2><p>فاکتور ${E(o.no)} · ${E(o.d)}</p><p><b>خریدار:</b> ${E(o.b.n)} · ${E(o.b.p)}<br><b>تحویل:</b> ${E(where(o))}</p><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><th>کالا</th><th>تعداد</th><th>قیمت</th></tr>${o.items.map(i=>`<tr><td>${E(i.name)} ${E(i.color)} ${E(i.size)}</td><td>${i.q}</td><td>${T(i.price*i.q)}</td></tr>`).join('')}</table><p>جمع کالاها: ${T(o.sub)}<br>هزینه ارسال: ${o.ship?T(o.ship):'رایگان'}<br><b>مبلغ پرداخت‌شده: ${T(o.total)}</b><br>کد پیگیری پرداخت: ${E(o.ref)}</p><p><b>وضعیت پرداخت: تأیید شد</b></p><p>وضعیت سفارش: در انتظار ${o.m==='pickup'?'آماده‌سازی برای تحویل حضوری':'ارسال'}.</p></div>`}
-app.set('trust proxy',1);app.use(compression());
+app.set('trust proxy',1);app.use(compression());app.use(express.json({limit:'1mb'}));
 const fails={};const sha=s=>crypto.createHash('sha256').update(String(s)).digest();
 function admin(req,res,next){const ip=req.ip,f=fails[ip]||{n:0,t:Date.now()};if(Date.now()-f.t>9e5){f.n=0;f.t=Date.now()}
   if(f.n>=10)return res.status(429).json({error:'تلاش زیاد؛ بعداً امتحان کنید.'});
@@ -34,7 +34,6 @@ function admin(req,res,next){const ip=req.ip,f=fails[ip]||{n:0,t:Date.now()};if(
 app.post('/api/admin/catalog',admin,express.json({limit:'25mb'}),async(req,res)=>{try{const d=req.body?.data;
   if(!d||!Array.isArray(d.products)||d.products.length>500||!d.shop||typeof d.shop!=='object'||d.products.some(p=>!p||typeof p.id!=='string'||typeof p.name!=='string'))return res.status(400).json({error:'داده نامعتبر است.'});
   await kvSet('catalog',d);CAT=d;res.json({ok:true})}catch(e){console.error(e);res.status(500).json({error:'ذخیره در دیتابیس ناموفق بود.'})}});
-app.use(express.json({limit:'1mb'}));
 app.post('/api/checkout',async(req,res)=>{try{
   const {b,m,a,z,items,pay,ref,receipt}=req.body||{},ok=s=>typeof s==='string'&&s.length>0&&s.length<300;
   if(!b||!ok(b.n)||!ok(b.p)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.e||'')||!['post','pickup'].includes(m)||(m==='post'&&(!ok(a)||!/^\d{10}$/.test(z||''))))return res.status(400).json({error:'اطلاعات واردشده کامل نیست.'});
@@ -63,10 +62,21 @@ app.get('/api/callback',async(req,res)=>{try{const id=String(req.query.o||''),o=
 app.get('/api/order/:id',async(req,res)=>{try{const o=await getOrder(req.params.id);if(!o||(!o.paid&&o.status!=='awaiting'))return res.json({paid:false});const{authority,receipt,...pub}=o;res.json(pub)}catch(e){res.json({paid:false})}});
 app.get('/api/catalog',async(req,res)=>{try{res.set('Cache-Control','no-cache');res.json({data:await catalog()})}catch(e){console.error(e);res.status(500).json({})}});
 app.post('/api/admin/ping',admin,(req,res)=>res.json({ok:true}));
-app.post('/api/admin/confirm',admin,async(req,res)=>{try{const o=await getOrder(req.body?.id||'');if(!o||o.status!=='awaiting')return res.status(404).json({error:'سفارش در انتظار تأیید پیدا نشد.'});
-  o.paid=true;o.status='pending';o.ref='کارت‌به‌کارت'+(o.cref?' - '+o.cref:'');await putOrder(o);let mailed=true;
-  try{if(!SMTP_HOST||!SMTP_USER||!SMTP_PASS)throw new Error('SMTP settings are incomplete');await mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:o.b.e,bcc:SHOP_EMAIL,subject:`فاکتور و تأیید پرداخت سفارش ${o.no}`,html:invoiceHtml(o,(await catalog()).shop)})}catch(e){console.error('Invoice email failed:',e.message);mailed=false}
-  res.json({ok:true,mailed})}catch(e){console.error(e);res.status(500).json({error:'خطای سرور'})}});
+async function sendInvoice(o){
+  if(!SMTP_HOST||!SMTP_USER||!SMTP_PASS)throw new Error('تنظیمات SMTP در Render کامل نیست (SMTP_HOST / SMTP_USER / SMTP_PASS).');
+  const recipients=[o.b?.e,SHOP_EMAIL].filter((v,i,a)=>v&&a.indexOf(v)===i);
+  if(!o.b?.e)throw new Error('ایمیل خریدار در سفارش ثبت نشده است.');
+  const info=await mailer.sendMail({from:MAIL_FROM||SMTP_USER,to:o.b.e,bcc:SHOP_EMAIL&&SHOP_EMAIL!==o.b.e?SHOP_EMAIL:undefined,subject:`فاکتور و تأیید پرداخت سفارش ${o.no}`,html:invoiceHtml(o,(await catalog()).shop)});
+  return {messageId:info.messageId,recipients};
+}
+app.post('/api/admin/confirm',admin,async(req,res)=>{try{
+  const id=String(req.body?.id||'').trim();if(!id)return res.status(400).json({error:'شناسه سفارش ارسال نشده است.'});
+  const o=await getOrder(id);if(!o||!['awaiting','pending'].includes(o.status))return res.status(404).json({error:'سفارش پیدا نشد یا قابل تأیید نیست.'});
+  if(o.status==='awaiting'){o.paid=true;o.status='pending';o.ref='کارت‌به‌کارت'+(o.cref?' - '+o.cref:'');o.confirmedAt=Date.now();await putOrder(o)}
+  try{const sent=await sendInvoice(o);o.invoiceSentAt=Date.now();o.invoiceMessageId=sent.messageId||'';o.invoiceError='';await putOrder(o);return res.json({ok:true,mailed:true,message:'پرداخت تأیید شد و فاکتور ارسال شد.'})}
+  catch(e){o.invoiceError=String(e.message||e);await putOrder(o);console.error('Invoice email failed:',e);return res.status(200).json({ok:true,mailed:false,error:o.invoiceError,message:'پرداخت تأیید شد اما ایمیل ارسال نشد؛ می‌توانید ارسال مجدد را بزنید.'})}
+}catch(e){console.error('admin confirm failed:',e);res.status(500).json({error:'خطای سرور هنگام تأیید سفارش.'})}});
+app.post('/api/admin/resend-invoice',admin,async(req,res)=>{try{const id=String(req.body?.id||'').trim(),o=await getOrder(id);if(!o||!o.paid)return res.status(404).json({error:'سفارش تأییدشده پیدا نشد.'});const sent=await sendInvoice(o);o.invoiceSentAt=Date.now();o.invoiceMessageId=sent.messageId||'';o.invoiceError='';await putOrder(o);res.json({ok:true,mailed:true})}catch(e){console.error('resend invoice failed:',e);res.status(200).json({ok:true,mailed:false,error:String(e.message||e)})}});
 app.post('/api/admin/receipt',admin,async(req,res)=>{try{const o=await getOrder(req.body?.id||'');res.json({data:o&&o.receipt||null})}catch(e){res.status(500).json({error:'خطا'})}});
 app.post('/api/admin/orders',admin,async(req,res)=>{try{res.json({orders:(await listOrders()).filter(o=>o.paid||o.status==='awaiting').map(({authority,receipt,...o})=>({...o,hasReceipt:!!receipt}))})}catch(e){console.error(e);res.status(500).json({error:'خطای دیتابیس'})}});
 app.post('/api/admin/ship',admin,async(req,res)=>{const o=await getOrder(req.body?.id||'');if(!o||!o.paid)return res.status(404).json({error:'not found'});
